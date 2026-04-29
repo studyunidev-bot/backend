@@ -12,7 +12,20 @@ import {
 import { PrismaService } from './prisma/prisma.service';
 
 const requireFromProjectRoot = createRequire(`${process.cwd()}/`);
-const ExcelJS = requireFromProjectRoot('./.deps/node_modules/exceljs');
+
+function requireProjectDependency<T>(preferredPath: string, fallbackPath: string): T {
+  try {
+    return requireFromProjectRoot(preferredPath) as T;
+  } catch (error: any) {
+    if (error?.code !== 'MODULE_NOT_FOUND') {
+      throw error;
+    }
+
+    return requireFromProjectRoot(fallbackPath) as T;
+  }
+}
+
+const ExcelJS = requireProjectDependency<any>('./.deps/node_modules/exceljs', 'exceljs');
 
 type UploadFile = {
   path: string;
@@ -209,6 +222,15 @@ function readPositiveIntEnv(name: string, fallback: number, min = 1, max = Numbe
 
   return Math.min(rawValue, max);
 }
+type ResolvedExamLocation = {
+  id: string;
+  code: string;
+  name: string;
+  province?: string | null;
+  eventDate?: Date | null;
+  eventStartMinutes?: number | null;
+  eventEndMinutes?: number | null;
+};
 
 @Injectable()
 export class ImportsService {
@@ -996,7 +1018,7 @@ export class ImportsService {
     sourceType: EnrollmentSourceType,
     importFileId: string,
     province?: string,
-  ) {
+  ): Promise<ResolvedExamLocation | null> {
     const locationValue = this.normalizeLocationCode(rawLocation);
     const normalizedProvince = this.asOptionalString(province);
 
@@ -1048,11 +1070,11 @@ export class ImportsService {
   }
 
   private async backfillOnsiteLocationProvince(
-    examLocation: { id: string; province?: string | null },
+    examLocation: ResolvedExamLocation,
     sourceType: EnrollmentSourceType,
     importFileId: string,
     province?: string | null,
-  ) {
+  ): Promise<ResolvedExamLocation> {
     if (
       sourceType !== EnrollmentSourceType.ONSITE_EXCEL ||
       !province ||

@@ -4,8 +4,34 @@ import { createRequire } from 'node:module';
 import { PrismaClient } from '../generated/prisma/client';
 
 const requireFromProjectRoot = createRequire(`${process.cwd()}/`);
-const { PrismaPg } = requireFromProjectRoot('./.deps/node_modules/@prisma/adapter-pg');
-const { Pool } = requireFromProjectRoot('./.deps/node_modules/pg');
+
+function requireProjectDependency<T>(preferredPath: string, fallbackPath: string): T {
+  try {
+    return requireFromProjectRoot(preferredPath) as T;
+  } catch (error: any) {
+    if (error?.code !== 'MODULE_NOT_FOUND') {
+      throw error;
+    }
+
+    return requireFromProjectRoot(fallbackPath) as T;
+  }
+}
+
+type PrismaPgConstructor = new (pool: unknown) => unknown;
+type PoolConstructor = new (options: {
+  connectionString?: string;
+  max?: number;
+  idleTimeoutMillis?: number;
+}) => unknown;
+
+const { PrismaPg } = requireProjectDependency<{ PrismaPg: PrismaPgConstructor }>(
+  './.deps/node_modules/@prisma/adapter-pg',
+  '@prisma/adapter-pg',
+);
+const { Pool } = requireProjectDependency<{ Pool: PoolConstructor }>(
+  './.deps/node_modules/pg',
+  'pg',
+);
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
