@@ -10,6 +10,13 @@ type AppConfig = {
   trustProxy: boolean;
 };
 
+const DEFAULT_CORS_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://www.studyunith.com',
+  'https://studyunith.com',
+];
+
 function parseNumber(name: string, fallback: number) {
   const raw = process.env[name];
 
@@ -53,7 +60,7 @@ function buildConfig(): AppConfig {
     nodeEnv,
     isProduction,
     port,
-    corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:3000')
+    corsOrigins: (process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGINS.join(','))
       .split(',')
       .map((origin) => origin.trim())
       .filter(Boolean),

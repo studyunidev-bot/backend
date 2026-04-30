@@ -108,6 +108,10 @@ type ImportBatchResult = {
   }>;
 };
 
+type EnrollmentImportBatchResult = ImportBatchResult & {
+  importedStudentIds: string[];
+};
+
 type ImportResponse = {
   meta: {
     parserVersion: string;
@@ -268,6 +272,7 @@ export class ImportsService {
       onsite: null,
       simulated: null,
     };
+    const importedStudentIdsBySource = new Map<EnrollmentSourceType, Set<string>>();
     const startedAt = Date.now();
 
     try {
@@ -276,7 +281,7 @@ export class ImportsService {
       }
 
       if (request.files.onsite?.[0]) {
-        response.onsite = await this.importEnrollments({
+        const onsiteResult = await this.importEnrollments({
           file: request.files.onsite[0],
           academicYear,
           round: this.parseExamRound(request.onsiteRound, 'MORNING'),
@@ -284,10 +289,13 @@ export class ImportsService {
           uploadedById: request.uploadedById,
           examDate: request.examDate,
         });
+        const { importedStudentIds, ...onsiteSummary } = onsiteResult;
+        response.onsite = onsiteSummary;
+        importedStudentIdsBySource.set(EnrollmentSourceType.ONSITE_EXCEL, new Set(importedStudentIds));
       }
 
       if (request.files.simulated?.[0]) {
-        response.simulated = await this.importEnrollments({
+        const simulatedResult = await this.importEnrollments({
           file: request.files.simulated[0],
           academicYear,
           round: this.parseExamRound(request.simulatedRound, 'AFTERNOON'),
@@ -295,6 +303,16 @@ export class ImportsService {
           uploadedById: request.uploadedById,
           examDate: request.examDate,
         });
+        const { importedStudentIds, ...simulatedSummary } = simulatedResult;
+        response.simulated = simulatedSummary;
+        importedStudentIdsBySource.set(
+          EnrollmentSourceType.SIMULATED_EXCEL,
+          new Set(importedStudentIds),
+        );
+      }
+
+      if (importedStudentIdsBySource.size > 0) {
+        await this.softDeleteStaleCurrentYearEnrollmentSources(academicYear, importedStudentIdsBySource);
       }
 
       const durationMs = Date.now() - startedAt;
@@ -449,6 +467,7 @@ export class ImportsService {
     const errors: string[] = [];
     const warnings: string[] = [];
     const headerDetections: Array<{ rowNumber: number; headers: string[] }> = [];
+    const importedStudentIds = new Set<string>();
     let rowCount = 0;
     let successCount = 0;
     let unresolvedLocationCount = 0;
@@ -482,6 +501,9 @@ export class ImportsService {
         successCount += batchResult.processedCount;
         unresolvedLocationCount += batchResult.unresolvedLocationCount;
         errors.push(...batchResult.errors);
+        for (const studentId of batchResult.importedStudentIds) {
+          importedStudentIds.add(studentId);
+        }
         batch.length = 0;
       },
       (detectedHeaders, rowNumber) => {
@@ -500,6 +522,9 @@ export class ImportsService {
       successCount += batchResult.processedCount;
       unresolvedLocationCount += batchResult.unresolvedLocationCount;
       errors.push(...batchResult.errors);
+      for (const studentId of batchResult.importedStudentIds) {
+        importedStudentIds.add(studentId);
+      }
     }
 
     if (unresolvedLocationCount > 0) {
@@ -536,6 +561,7 @@ export class ImportsService {
       unresolvedLocationCount,
       durationMs,
       headerDetections,
+      importedStudentIds: [...importedStudentIds],
     };
   }
 
@@ -795,7 +821,7 @@ export class ImportsService {
     },
   ) {
     if (batch.length === 0) {
-      return { processedCount: 0, unresolvedLocationCount: 0, errors: [] as string[] };
+      return { processedCount: 0, unresolvedLocationCount: 0, errors: [] as string[], importedStudentIds: [] as string[] };
     }
 
     const studentMap = await this.prepareStudentMap(batch);
@@ -814,6 +840,8 @@ export class ImportsService {
       enrollmentStateMap,
     );
     const historicalEnrollmentCleanupDone = new Set<string>();
+    const sameYearSiblingCleanupDone = new Set<string>();
+    const importedStudentIds = new Set<string>();
     let unresolvedLocationCount = 0;
     let processedCount = 0;
     const errors: string[] = [];
@@ -862,6 +890,11 @@ export class ImportsService {
           if (!historicalEnrollmentCleanupDone.has(student.id)) {
             await this.softDeleteHistoricalEnrollments(student.id, params.academicYear);
             historicalEnrollmentCleanupDone.add(student.id);
+          }
+
+          if (!sameYearSiblingCleanupDone.has(student.id)) {
+            await this.softDeleteSameYearSiblingEnrollmentSources(student.id, params.academicYear, params.sourceType);
+            sameYearSiblingCleanupDone.add(student.id);
           }
 
           const effectiveRound = row.examRound || params.round;
@@ -941,6 +974,7 @@ export class ImportsService {
           }
           const notes = this.replacePendingLocationNotes(existing?.notes, pendingLocationCode);
           const enrollmentUpdateData: Prisma.EnrollmentUncheckedUpdateInput = {
+            deletedAt: null,
             status: EnrollmentStatus.REGISTERED,
             sourceType: params.sourceType,
             ...(shouldGenerateBarcode ? { barcode } : {}),
@@ -1006,6 +1040,7 @@ export class ImportsService {
             barcode: enrollment.barcode,
             notes: enrollment.notes,
           });
+          importedStudentIds.add(student.id);
 
           if (params.sourceType === EnrollmentSourceType.SIMULATED_EXCEL && this.hasScoreData(row)) {
             await this.prisma.score.upsert({
@@ -1025,7 +1060,45 @@ export class ImportsService {
       },
     );
 
-    return { processedCount, unresolvedLocationCount, errors };
+    return { processedCount, unresolvedLocationCount, errors, importedStudentIds: [...importedStudentIds] };
+  }
+
+  private async softDeleteStaleCurrentYearEnrollmentSources(
+    academicYear: number,
+    importedStudentIdsBySource: Map<EnrollmentSourceType, Set<string>>,
+  ) {
+    const desiredSourceTypesByStudent = new Map<string, Set<EnrollmentSourceType>>();
+    const managedSourceTypes = [EnrollmentSourceType.ONSITE_EXCEL, EnrollmentSourceType.SIMULATED_EXCEL];
+
+    for (const [sourceType, studentIds] of importedStudentIdsBySource.entries()) {
+      for (const studentId of studentIds) {
+        const desiredSourceTypes = desiredSourceTypesByStudent.get(studentId) ?? new Set<EnrollmentSourceType>();
+        desiredSourceTypes.add(sourceType);
+        desiredSourceTypesByStudent.set(studentId, desiredSourceTypes);
+      }
+    }
+
+    for (const [studentId, desiredSourceTypes] of desiredSourceTypesByStudent.entries()) {
+      const staleSourceTypes = managedSourceTypes.filter((sourceType) => !desiredSourceTypes.has(sourceType));
+
+      if (staleSourceTypes.length === 0) {
+        continue;
+      }
+
+      await this.prisma.enrollment.updateMany({
+        where: {
+          studentId,
+          academicYear,
+          deletedAt: null,
+          sourceType: {
+            in: staleSourceTypes,
+          },
+        },
+        data: {
+          deletedAt: new Date(),
+        },
+      });
+    }
   }
 
   private async softDeleteHistoricalEnrollments(studentId: string, academicYear: number) {
@@ -1036,6 +1109,34 @@ export class ImportsService {
           not: academicYear,
         },
         deletedAt: null,
+      },
+      data: {
+        deletedAt: new Date(),
+      },
+    });
+  }
+
+  private async softDeleteSameYearSiblingEnrollmentSources(
+    studentId: string,
+    academicYear: number,
+    sourceType: EnrollmentSourceType,
+  ) {
+    const siblingSourceTypes = [EnrollmentSourceType.ONSITE_EXCEL, EnrollmentSourceType.SIMULATED_EXCEL].filter(
+      (candidate) => candidate !== sourceType,
+    );
+
+    if (siblingSourceTypes.length === 0) {
+      return;
+    }
+
+    await this.prisma.enrollment.updateMany({
+      where: {
+        studentId,
+        academicYear,
+        deletedAt: null,
+        sourceType: {
+          in: siblingSourceTypes,
+        },
       },
       data: {
         deletedAt: new Date(),

@@ -1103,6 +1103,102 @@ describe('ImportsService', () => {
     );
   });
 
+  it('reactivates a soft-deleted enrollment when the same source is re-imported', async () => {
+    prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
+    prisma.enrollment.findMany.mockResolvedValue([]);
+    prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '87654321', notes: null });
+
+    await (service as any).flushEnrollmentBatch(
+      [
+        {
+          rowNumber: 3,
+          row: {
+            nationalId: '1102400222395',
+            firstNameTh: 'ศิริศักดิ์',
+            lastNameTh: 'ธิดชัชวาลกุล',
+            examRound: ExamRound.AFTERNOON,
+          },
+        },
+      ],
+      {
+        academicYear: 2026,
+        round: ExamRound.AFTERNOON,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        importFileId: 'import-reactivate',
+      },
+    );
+
+    expect(prisma.enrollment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          deletedAt: null,
+          sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        }),
+      }),
+    );
+  });
+
+  it('soft deletes the same-year onsite enrollment during a simulated batch import for the same student', async () => {
+    prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1104500101036' }]);
+    prisma.enrollment.findMany.mockResolvedValue([]);
+    prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '87654321', notes: null });
+
+    await (service as any).flushEnrollmentBatch(
+      [
+        {
+          rowNumber: 3,
+          row: {
+            nationalId: '1104500101036',
+            firstNameTh: 'สมชาย',
+            lastNameTh: 'ใจดี',
+            examRound: ExamRound.AFTERNOON,
+          },
+        },
+      ],
+      {
+        academicYear: 2026,
+        round: ExamRound.AFTERNOON,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        importFileId: 'import-sim-only',
+      },
+    );
+
+    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
+      where: {
+        studentId: 'student-1',
+        academicYear: 2026,
+        deletedAt: null,
+        sourceType: {
+          in: [EnrollmentSourceType.ONSITE_EXCEL],
+        },
+      },
+      data: {
+        deletedAt: expect.any(Date),
+      },
+    });
+  });
+
+  it('soft deletes the same-year sibling source when the latest upload only contains one source type for a student', async () => {
+    await (service as any).softDeleteStaleCurrentYearEnrollmentSources(
+      2026,
+      new Map([[EnrollmentSourceType.SIMULATED_EXCEL, new Set(['student-1'])]]),
+    );
+
+    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
+      where: {
+        studentId: 'student-1',
+        academicYear: 2026,
+        deletedAt: null,
+        sourceType: {
+          in: [EnrollmentSourceType.ONSITE_EXCEL],
+        },
+      },
+      data: {
+        deletedAt: expect.any(Date),
+      },
+    });
+  });
+
   it('soft deletes the same student historical enrollments from other academic years before importing the latest year', async () => {
     prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
     prisma.enrollment.findMany.mockResolvedValue([]);
