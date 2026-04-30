@@ -110,6 +110,10 @@ type ImportBatchResult = {
 
 type EnrollmentImportBatchResult = ImportBatchResult & {
   importedStudentIds: string[];
+  importedEnrollmentRounds: Array<{
+    studentId: string;
+    examRound: ExamRound;
+  }>;
 };
 
 type ImportResponse = {
@@ -468,6 +472,7 @@ export class ImportsService {
     const warnings: string[] = [];
     const headerDetections: Array<{ rowNumber: number; headers: string[] }> = [];
     const importedStudentIds = new Set<string>();
+    const importedEnrollmentRoundsByStudent = new Map<string, Set<ExamRound>>();
     let rowCount = 0;
     let successCount = 0;
     let unresolvedLocationCount = 0;
@@ -504,6 +509,11 @@ export class ImportsService {
         for (const studentId of batchResult.importedStudentIds) {
           importedStudentIds.add(studentId);
         }
+        for (const enrollmentIdentity of batchResult.importedEnrollmentRounds) {
+          const existingRounds = importedEnrollmentRoundsByStudent.get(enrollmentIdentity.studentId) || new Set<ExamRound>();
+          existingRounds.add(enrollmentIdentity.examRound);
+          importedEnrollmentRoundsByStudent.set(enrollmentIdentity.studentId, existingRounds);
+        }
         batch.length = 0;
       },
       (detectedHeaders, rowNumber) => {
@@ -525,6 +535,19 @@ export class ImportsService {
       for (const studentId of batchResult.importedStudentIds) {
         importedStudentIds.add(studentId);
       }
+      for (const enrollmentIdentity of batchResult.importedEnrollmentRounds) {
+        const existingRounds = importedEnrollmentRoundsByStudent.get(enrollmentIdentity.studentId) || new Set<ExamRound>();
+        existingRounds.add(enrollmentIdentity.examRound);
+        importedEnrollmentRoundsByStudent.set(enrollmentIdentity.studentId, existingRounds);
+      }
+    }
+
+    if (importedEnrollmentRoundsByStudent.size > 0) {
+      await this.softDeleteStaleCurrentYearSameSourceEnrollments(
+        params.academicYear,
+        params.sourceType,
+        importedEnrollmentRoundsByStudent,
+      );
     }
 
     if (unresolvedLocationCount > 0) {
@@ -562,6 +585,9 @@ export class ImportsService {
       durationMs,
       headerDetections,
       importedStudentIds: [...importedStudentIds],
+      importedEnrollmentRounds: Array.from(importedEnrollmentRoundsByStudent.entries()).flatMap(
+        ([studentId, rounds]) => Array.from(rounds).map((examRound) => ({ studentId, examRound })),
+      ),
     };
   }
 
@@ -821,7 +847,13 @@ export class ImportsService {
     },
   ) {
     if (batch.length === 0) {
-      return { processedCount: 0, unresolvedLocationCount: 0, errors: [] as string[], importedStudentIds: [] as string[] };
+      return {
+        processedCount: 0,
+        unresolvedLocationCount: 0,
+        errors: [] as string[],
+        importedStudentIds: [] as string[],
+        importedEnrollmentRounds: [] as Array<{ studentId: string; examRound: ExamRound }>,
+      };
     }
 
     const studentMap = await this.prepareStudentMap(batch);
@@ -842,6 +874,7 @@ export class ImportsService {
     const historicalEnrollmentCleanupDone = new Set<string>();
     const sameYearSiblingCleanupDone = new Set<string>();
     const importedStudentIds = new Set<string>();
+    const importedEnrollmentRounds = new Map<string, Set<ExamRound>>();
     let unresolvedLocationCount = 0;
     let processedCount = 0;
     const errors: string[] = [];
@@ -1041,6 +1074,9 @@ export class ImportsService {
             notes: enrollment.notes,
           });
           importedStudentIds.add(student.id);
+          const existingRounds = importedEnrollmentRounds.get(student.id) || new Set<ExamRound>();
+          existingRounds.add(effectiveRound);
+          importedEnrollmentRounds.set(student.id, existingRounds);
 
           if (params.sourceType === EnrollmentSourceType.SIMULATED_EXCEL && this.hasScoreData(row)) {
             await this.prisma.score.upsert({
@@ -1060,7 +1096,15 @@ export class ImportsService {
       },
     );
 
-    return { processedCount, unresolvedLocationCount, errors, importedStudentIds: [...importedStudentIds] };
+    return {
+      processedCount,
+      unresolvedLocationCount,
+      errors,
+      importedStudentIds: [...importedStudentIds],
+      importedEnrollmentRounds: Array.from(importedEnrollmentRounds.entries()).flatMap(([studentId, rounds]) =>
+        Array.from(rounds).map((examRound) => ({ studentId, examRound })),
+      ),
+    };
   }
 
   private async softDeleteStaleCurrentYearEnrollmentSources(
@@ -1142,6 +1186,33 @@ export class ImportsService {
         deletedAt: new Date(),
       },
     });
+  }
+
+  private async softDeleteStaleCurrentYearSameSourceEnrollments(
+    academicYear: number,
+    sourceType: EnrollmentSourceType,
+    importedEnrollmentRoundsByStudent: Map<string, Set<ExamRound>>,
+  ) {
+    for (const [studentId, examRounds] of importedEnrollmentRoundsByStudent.entries()) {
+      if (examRounds.size === 0) {
+        continue;
+      }
+
+      await this.prisma.enrollment.updateMany({
+        where: {
+          studentId,
+          academicYear,
+          sourceType,
+          deletedAt: null,
+          examRound: {
+            notIn: Array.from(examRounds),
+          },
+        },
+        data: {
+          deletedAt: new Date(),
+        },
+      });
+    }
   }
 
   private async resolveExamLocationForEnrollment(

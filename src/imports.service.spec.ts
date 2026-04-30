@@ -1199,6 +1199,62 @@ describe('ImportsService', () => {
     });
   });
 
+  it('soft deletes stale same-source rounds that are missing from the latest simulated file for a student', async () => {
+    await (service as any).softDeleteStaleCurrentYearSameSourceEnrollments(
+      2026,
+      EnrollmentSourceType.SIMULATED_EXCEL,
+      new Map([['student-1', new Set([ExamRound.AFTERNOON])]]),
+    );
+
+    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
+      where: {
+        studentId: 'student-1',
+        academicYear: 2026,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        deletedAt: null,
+        examRound: {
+          notIn: [ExamRound.AFTERNOON],
+        },
+      },
+      data: {
+        deletedAt: expect.any(Date),
+      },
+    });
+  });
+
+  it('returns the imported student rounds from a batch so later cleanup can keep only the latest file rounds', async () => {
+    prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1104500101036' }]);
+    prisma.enrollment.findMany.mockResolvedValue([]);
+    prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '87654321', notes: null });
+
+    const result = await (service as any).flushEnrollmentBatch(
+      [
+        {
+          rowNumber: 3,
+          row: {
+            nationalId: '1104500101036',
+            firstNameTh: 'สมชาย',
+            lastNameTh: 'ใจดี',
+            examRound: ExamRound.AFTERNOON,
+          },
+        },
+      ],
+      {
+        academicYear: 2026,
+        round: ExamRound.AFTERNOON,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        importFileId: 'import-round-tracking',
+      },
+    );
+
+    expect(result.importedEnrollmentRounds).toEqual([
+      {
+        studentId: 'student-1',
+        examRound: ExamRound.AFTERNOON,
+      },
+    ]);
+  });
+
   it('soft deletes the same student historical enrollments from other academic years before importing the latest year', async () => {
     prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
     prisma.enrollment.findMany.mockResolvedValue([]);
