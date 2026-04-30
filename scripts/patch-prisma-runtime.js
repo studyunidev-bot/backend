@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const projectRoot = process.cwd();
+const projectRoot = path.resolve(__dirname, '..');
 const prismaClientCandidates = [
   path.join(projectRoot, 'node_modules', '@prisma', 'client'),
   path.join(projectRoot, '.deps', 'node_modules', '@prisma', 'client'),
@@ -70,7 +70,7 @@ function collectGeneratedFiles(root) {
 
 function buildImportPattern(originalImport) {
   const escapedImport = escapeRegExp(originalImport);
-  return new RegExp(`(?:(?:\\.\\.?/)|(?:\\.deps/node_modules/))*${escapedImport}(?:\\.js)*`, 'g');
+  return new RegExp(`(?:(?:\\.\\.?/)+(?:node_modules/)?|(?:\\.deps/node_modules/))*${escapedImport}(?:\\.js)*`, 'g');
 }
 
 function toImportPath(fromFile, target, importBaseDir) {

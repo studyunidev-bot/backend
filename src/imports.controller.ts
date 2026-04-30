@@ -23,9 +23,9 @@ export class ImportsController {
   @UseInterceptors(
     FileFieldsInterceptor(
       [
+        { name: 'locations', maxCount: 1 },
         { name: 'onsite', maxCount: 1 },
         { name: 'simulated', maxCount: 1 },
-        { name: 'locations', maxCount: 1 },
       ],
       {
         dest: uploadDir,

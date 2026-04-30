@@ -332,6 +332,7 @@ export class ImportsService {
     let successCount = 0;
     let reconciledCount = 0;
     let headers: string[] = [];
+    let previousLocationContext: Partial<Record<'name' | 'province' | 'seatCapacity' | 'eventDate' | 'timeRange' | 'startTime' | 'endTime', unknown>> = {};
 
     await this.streamWorksheet(
       file.path,
@@ -341,11 +342,13 @@ export class ImportsService {
       headers = resolvedHeaders;
 
       try {
-        const mappedRow = this.mapLocationRow(row);
+        const hydratedRow = this.hydrateLocationRowFromPreviousContext(row, previousLocationContext);
+        const mappedRow = this.mapLocationRow(hydratedRow);
 
         if (mappedRow) {
           rowCount += 1;
           batch.push(mappedRow);
+          previousLocationContext = this.captureLocationRowContext(hydratedRow, previousLocationContext);
         }
       } catch (error) {
         rowCount += 1;
@@ -362,6 +365,12 @@ export class ImportsService {
         headerDetections.push({ headers: detectedHeaders, rowNumber });
       },
     );
+
+    if (headerDetections.length === 0 && rowCount === 0 && successCount === 0 && errors.length === 0) {
+      throw new BadRequestException(
+        `locations file ${file.originalname} could not be parsed: no recognizable header row was found`,
+      );
+    }
 
     if (batch.length > 0) {
       const batchResult = await this.flushLocationBatch(batch, importFile.id);
@@ -804,6 +813,7 @@ export class ImportsService {
       params.sourceType,
       enrollmentStateMap,
     );
+    const historicalEnrollmentCleanupDone = new Set<string>();
     let unresolvedLocationCount = 0;
     let processedCount = 0;
     const errors: string[] = [];
@@ -848,6 +858,11 @@ export class ImportsService {
               province: row.province,
             },
           });
+
+          if (!historicalEnrollmentCleanupDone.has(student.id)) {
+            await this.softDeleteHistoricalEnrollments(student.id, params.academicYear);
+            historicalEnrollmentCleanupDone.add(student.id);
+          }
 
           const effectiveRound = row.examRound || params.round;
           const enrollmentKey = this.buildEnrollmentStateKey(
@@ -1011,6 +1026,21 @@ export class ImportsService {
     );
 
     return { processedCount, unresolvedLocationCount, errors };
+  }
+
+  private async softDeleteHistoricalEnrollments(studentId: string, academicYear: number) {
+    await this.prisma.enrollment.updateMany({
+      where: {
+        studentId,
+        academicYear: {
+          not: academicYear,
+        },
+        deletedAt: null,
+      },
+      data: {
+        deletedAt: new Date(),
+      },
+    });
   }
 
   private async resolveExamLocationForEnrollment(
@@ -1366,17 +1396,30 @@ export class ImportsService {
   }
 
   private mapLocationRow(row: Record<string, unknown>): LocationImportRow | null {
-    const rawCode = this.asString(row.code);
+    const recoveredCode = this.recoverLocationCodeFromRawRow(row);
+    const rawCode = this.asString(row.code) || recoveredCode;
     const code = this.normalizeLocationCode(rawCode);
     const name = this.asOptionalString(row.name);
     const province = this.asOptionalString(row.province);
 
+    if (this.isLocationSummaryRow(row, rawCode)) {
+      return null;
+    }
+
     if (!rawCode || rawCode === 'รวม') {
+      if (this.hasMeaningfulLocationRowContent(row)) {
+        const rawPreview = this.buildRawRowPreview(row);
+        throw new BadRequestException(
+          `code is required in location rows${rawPreview ? ` | raw: ${rawPreview}` : ''}`,
+        );
+      }
+
       return null;
     }
 
     if (!code) {
-      throw new BadRequestException('code is required in location rows');
+      const rawPreview = this.buildRawRowPreview(row);
+      throw new BadRequestException(`code is required in location rows${rawPreview ? ` | raw: ${rawPreview}` : ''}`);
     }
 
     return {
@@ -1384,10 +1427,103 @@ export class ImportsService {
       name: name || this.buildFallbackLocationName(code, province),
       province,
       address: this.asOptionalString(row.address),
-      seatCapacity: this.asOptionalNumber(row.seatCapacity),
+      seatCapacity: this.asOptionalNumber(row.seatCapacity) ?? this.recoverLocationSeatCapacityFromRawRow(row),
       eventDate: this.parseDate(row.eventDate) ?? undefined,
       ...this.parseLocationTimeMetadata(row.startTime, row.endTime, row.timeRange),
     };
+  }
+
+  private recoverLocationCodeFromRawRow(row: Record<string, unknown>) {
+    const rawValues = Array.isArray(row.__rawValues) ? row.__rawValues : [];
+
+    if (rawValues.length === 0) {
+      return '';
+    }
+
+    const candidate = rawValues
+      .map((value) => this.asString(value))
+      .slice(0, 3)
+      .find((value) => this.isLikelyLocationCodeCandidate(value));
+
+    return candidate || '';
+  }
+
+  private recoverLocationSeatCapacityFromRawRow(row: Record<string, unknown>) {
+    const rawValues = Array.isArray(row.__rawValues) ? row.__rawValues : [];
+
+    if (rawValues.length === 0) {
+      return undefined;
+    }
+
+    return this.asOptionalNumber(rawValues[rawValues.length - 1]);
+  }
+
+  private isLikelyLocationCodeCandidate(value: string) {
+    const normalized = this.normalizeLocationCode(value);
+
+    if (!normalized || normalized === 'รวม') {
+      return false;
+    }
+
+    if (/^\d+$/.test(normalized)) {
+      return true;
+    }
+
+    return /^(?:สนามสอบที่|สนามสอบหมายเลข|รหัสสนามสอบ|รหัสสถานที่สอบ)\s*\d+(?:\.0+)?$/i.test(this.asString(value));
+  }
+
+  private hasMeaningfulLocationRowContent(row: Record<string, unknown>) {
+    return [row.name, row.province, row.address, row.seatCapacity, row.eventDate, row.timeRange, row.startTime, row.endTime]
+      .some((value) => this.asString(value));
+  }
+
+  private isLocationSummaryRow(row: Record<string, unknown>, rawCode?: string) {
+    const normalizedCode = this.normalizeHeader(rawCode || this.asString(row.code));
+
+    if (normalizedCode === this.normalizeHeader('รวม')) {
+      return true;
+    }
+
+    const rawValues = Array.isArray(row.__rawValues) ? row.__rawValues : [];
+    const firstMeaningfulCell = rawValues
+      .map((value) => this.asString(value))
+      .find(Boolean);
+
+    return this.normalizeHeader(firstMeaningfulCell || '') === this.normalizeHeader('รวม');
+  }
+
+  private hydrateLocationRowFromPreviousContext(
+    row: Record<string, unknown>,
+    previousContext: Partial<Record<'name' | 'province' | 'seatCapacity' | 'eventDate' | 'timeRange' | 'startTime' | 'endTime', unknown>>,
+  ) {
+    if (!this.asString(row.code)) {
+      return row;
+    }
+
+    const nextRow = { ...row };
+
+    for (const field of ['name', 'province', 'seatCapacity', 'eventDate', 'timeRange', 'startTime', 'endTime'] as const) {
+      if (!this.asString(nextRow[field]) && previousContext[field] !== undefined) {
+        nextRow[field] = previousContext[field];
+      }
+    }
+
+    return nextRow;
+  }
+
+  private captureLocationRowContext(
+    row: Record<string, unknown>,
+    previousContext: Partial<Record<'name' | 'province' | 'seatCapacity' | 'eventDate' | 'timeRange' | 'startTime' | 'endTime', unknown>>,
+  ) {
+    const nextContext = { ...previousContext };
+
+    for (const field of ['name', 'province', 'seatCapacity', 'eventDate', 'timeRange', 'startTime', 'endTime'] as const) {
+      if (this.asString(row[field])) {
+        nextContext[field] = row[field];
+      }
+    }
+
+    return nextContext;
   }
 
   private buildFallbackLocationName(code: string, province?: string | null) {
@@ -1539,6 +1675,12 @@ export class ImportsService {
     const nonEmptyHeaders = headers.filter(Boolean);
 
     if (nonEmptyHeaders.length < 2) {
+      return false;
+    }
+
+    const firstMeaningfulHeader = nonEmptyHeaders[0];
+
+    if (this.isLikelyLocationCodeCandidate(firstMeaningfulHeader)) {
       return false;
     }
 
@@ -2483,11 +2625,11 @@ export class ImportsService {
 
   private rowToArray(values: unknown) {
     if (Array.isArray(values)) {
-      return Array.from(values.slice(1));
+      return Array.from(values.slice(1)).map((value) => this.normalizeWorksheetCellValue(value));
     }
 
     if (typeof values === 'object' && values !== null) {
-      return Array.from(Object.values(values).slice(1));
+      return Array.from(Object.values(values).slice(1)).map((value) => this.normalizeWorksheetCellValue(value));
     }
 
     return [];
@@ -2498,11 +2640,57 @@ export class ImportsService {
   }
 
   private isEmptyRow(values: unknown[]) {
-    return values.every((value) => value === null || value === undefined || String(value).trim() === '');
+    return values.every((value) => this.asString(value) === '');
   }
 
   private asString(value: unknown) {
-    return String(value ?? '').trim();
+    return String(this.normalizeWorksheetCellValue(value) ?? '').trim();
+  }
+
+  private normalizeWorksheetCellValue(value: unknown): unknown {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    if (value instanceof Date || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => this.asString(item)).join(' ').trim();
+    }
+
+    if (typeof value === 'object') {
+      const cellValue = value as {
+        text?: unknown;
+        result?: unknown;
+        richText?: Array<{ text?: unknown }>;
+        hyperlink?: unknown;
+        value?: unknown;
+      };
+
+      if (Array.isArray(cellValue.richText) && cellValue.richText.length > 0) {
+        return cellValue.richText.map((item) => this.asString(item.text)).join('').trim();
+      }
+
+      if (cellValue.result !== undefined && cellValue.result !== null) {
+        return this.normalizeWorksheetCellValue(cellValue.result);
+      }
+
+      if (cellValue.text !== undefined && cellValue.text !== null) {
+        return this.normalizeWorksheetCellValue(cellValue.text);
+      }
+
+      if (cellValue.value !== undefined && cellValue.value !== null) {
+        return this.normalizeWorksheetCellValue(cellValue.value);
+      }
+
+      if (cellValue.hyperlink !== undefined && cellValue.hyperlink !== null) {
+        return this.normalizeWorksheetCellValue(cellValue.hyperlink);
+      }
+    }
+
+    return value;
   }
 
   private asOptionalString(value: unknown) {

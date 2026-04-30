@@ -51,6 +51,7 @@ type PrismaMock = {
   enrollment: {
     findUnique: jest.Mock;
     findMany: jest.Mock;
+    updateMany: jest.Mock;
     upsert: jest.Mock;
   };
   examLocation: {
@@ -75,6 +76,7 @@ function createPrismaMock(): PrismaMock {
     enrollment: {
       findUnique: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       upsert: jest.fn(),
     },
     examLocation: {
@@ -677,6 +679,189 @@ describe('ImportsService', () => {
     expect(row.eventEndMinutes).toBe(16 * 60);
   });
 
+  it('hydrates merged location cells from the previous row context', () => {
+    const hydrated = (service as any).hydrateLocationRowFromPreviousContext(
+      {
+        code: '2',
+        name: '',
+        province: '',
+        address: 'ห้อง PSB1101',
+        eventDate: '',
+        timeRange: '',
+      },
+      {
+        name: 'คณะรัฐศาสตร์และรัฐประศาสนศาสตร์ ม.เชียงใหม่',
+        province: 'จ.เชียงใหม่',
+        eventDate: 'Sunday 2 Aug 2026',
+        timeRange: 'Sunday 2 Aug 2026',
+      },
+    );
+
+    expect(hydrated).toMatchObject({
+      code: '2',
+      name: 'คณะรัฐศาสตร์และรัฐประศาสนศาสตร์ ม.เชียงใหม่',
+      province: 'จ.เชียงใหม่',
+      address: 'ห้อง PSB1101',
+      eventDate: 'Sunday 2 Aug 2026',
+      timeRange: 'Sunday 2 Aug 2026',
+    });
+  });
+
+  it('maps merged-style location rows into complete location records', () => {
+    const hydrated = (service as any).hydrateLocationRowFromPreviousContext(
+      {
+        code: '2',
+        name: '',
+        province: '',
+        address: 'ห้อง PSB1101',
+        eventDate: '',
+        timeRange: '',
+      },
+      {
+        name: 'คณะรัฐศาสตร์และรัฐประศาสนศาสตร์ ม.เชียงใหม่',
+        province: 'จ.เชียงใหม่',
+        eventDate: 'Sunday 2 Aug 2026',
+        timeRange: 'Sunday 2 Aug 2026',
+      },
+    );
+
+    const row = (service as any).mapLocationRow(hydrated);
+
+    expect(row).toMatchObject({
+      code: '2',
+      name: 'คณะรัฐศาสตร์และรัฐประศาสนศาสตร์ ม.เชียงใหม่',
+      province: 'จ.เชียงใหม่',
+      address: 'ห้อง PSB1101',
+    });
+    expect(row.eventDate).toBeInstanceOf(Date);
+  });
+
+  it('recovers the location code from raw row values when the mapped code cell is empty', () => {
+    const row = (service as any).mapLocationRow({
+      code: '',
+      name: 'รอประกาศสนามสอบ',
+      province: 'กรุงเทพมหานคร',
+      address: 'รอประกาศ',
+      eventDate: 'Saturday 5 Sep 2026',
+      __rawValues: [13, 'กรุงเทพมหานคร', 'รอประกาศสนามสอบ', 'รอประกาศ', 'Saturday 5 Sep 2026', 0],
+    });
+
+    expect(row).toMatchObject({
+      code: '13',
+      name: 'รอประกาศสนามสอบ',
+      province: 'กรุงเทพมหานคร',
+      address: 'รอประกาศ',
+      seatCapacity: 0,
+    });
+  });
+
+  it('fails explicitly when a location-like row has content but no recoverable code', () => {
+    expect(() =>
+      (service as any).mapLocationRow({
+        code: '',
+        name: 'รอประกาศสนามสอบ',
+        province: 'จ.ขอนแก่น',
+        address: 'รอประกาศ',
+        eventDate: 'Saturday 12 Sep 2026',
+        __rawValues: ['', 'จ.ขอนแก่น', 'รอประกาศสนามสอบ', 'รอประกาศ', 'Saturday 12 Sep 2026', 0],
+      }),
+    ).toThrow('code is required in location rows');
+  });
+
+  it('skips the summary total row instead of treating it as a location import error', () => {
+    const row = (service as any).mapLocationRow({
+      code: '',
+      __rawValues: ['รวม', { richText: [{ text: '0' }] }],
+    });
+
+    expect(row).toBeNull();
+  });
+
+  it('normalizes rich text worksheet cell values before parsing rows', () => {
+    expect((service as any).asString({ richText: [{ text: 'สนามสอบที่ ' }, { text: '14' }] })).toBe('สนามสอบที่14');
+    expect((service as any).asString({ result: 0 })).toBe('0');
+  });
+
+  it('does not misclassify location data rows with สนามสอบ in the name as header fragments', () => {
+    expect(
+      (service as any).isPotentialHeaderFragment([
+        '13',
+        'กรุงเทพมหานคร',
+        'รอประกาศสนามสอบ',
+        'รอประกาศ',
+        'saturday5sep2026',
+        '0',
+      ]),
+    ).toBe(false);
+  });
+
+  it('overwrites the existing seat capacity with 0 when a re-uploaded location row has seatCapacity set to 0', async () => {
+    prisma.examLocation.upsert.mockResolvedValue({
+      id: 'location-1',
+      code: '8',
+      name: 'สนามสอบ 8',
+    });
+
+    await (service as any).flushLocationBatch(
+      [
+        {
+          code: '8',
+          name: 'สนามสอบ 8',
+          province: 'เชียงใหม่',
+          seatCapacity: 0,
+        },
+      ],
+      'import-1',
+    );
+
+    expect(prisma.examLocation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          code: '8',
+          name: 'สนามสอบ 8',
+          province: 'เชียงใหม่',
+          seatCapacity: 0,
+          importedFromId: 'import-1',
+          active: true,
+        }),
+        create: expect.objectContaining({
+          seatCapacity: 0,
+        }),
+      }),
+    );
+  });
+
+  it('overwrites the existing seat capacity when a re-uploaded location row has a non-zero seatCapacity', async () => {
+    prisma.examLocation.upsert.mockResolvedValue({
+      id: 'location-1',
+      code: '8',
+      name: 'สนามสอบ 8',
+    });
+
+    await (service as any).flushLocationBatch(
+      [
+        {
+          code: '8',
+          name: 'สนามสอบ 8',
+          province: 'เชียงใหม่',
+          seatCapacity: 1250,
+        },
+      ],
+      'import-1',
+    );
+
+    expect(prisma.examLocation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          seatCapacity: 1250,
+        }),
+        create: expect.objectContaining({
+          seatCapacity: 1250,
+        }),
+      }),
+    );
+  });
+
   it('persists score data only for simulated enrollments with score values', async () => {
     prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
     prisma.enrollment.findMany.mockResolvedValue([{ 
@@ -914,6 +1099,57 @@ describe('ImportsService', () => {
           barcode: expect.any(String),
           sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
         }),
+      }),
+    );
+  });
+
+  it('soft deletes the same student historical enrollments from other academic years before importing the latest year', async () => {
+    prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
+    prisma.enrollment.findMany.mockResolvedValue([]);
+    prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '87654321', notes: null });
+
+    await (service as any).flushEnrollmentBatch(
+      [
+        {
+          rowNumber: 3,
+          row: {
+            nationalId: '1102400222395',
+            firstNameTh: 'ศิริศักดิ์',
+            lastNameTh: 'ธิดชัชวาลกุล',
+            examRound: ExamRound.MORNING,
+          },
+        },
+      ],
+      {
+        academicYear: 2027,
+        round: ExamRound.MORNING,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        importFileId: 'import-3',
+      },
+    );
+
+    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
+      where: {
+        studentId: 'student-1',
+        academicYear: {
+          not: 2027,
+        },
+        deletedAt: null,
+      },
+      data: {
+        deletedAt: expect.any(Date),
+      },
+    });
+    expect(prisma.enrollment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          studentId_academicYear_examRound_sourceType: {
+            studentId: 'student-1',
+            academicYear: 2027,
+            examRound: ExamRound.MORNING,
+            sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+          },
+        },
       }),
     );
   });
