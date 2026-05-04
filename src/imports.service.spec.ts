@@ -1138,7 +1138,7 @@ describe('ImportsService', () => {
     );
   });
 
-  it('soft deletes the same-year onsite enrollment during a simulated batch import for the same student', async () => {
+  it('does not soft delete the sibling source during a simulated batch import for the same student', async () => {
     prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1104500101036' }]);
     prisma.enrollment.findMany.mockResolvedValue([]);
     prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '87654321', notes: null });
@@ -1163,40 +1163,17 @@ describe('ImportsService', () => {
       },
     );
 
-    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
-      where: {
-        studentId: 'student-1',
-        academicYear: 2026,
-        deletedAt: null,
-        sourceType: {
-          in: [EnrollmentSourceType.ONSITE_EXCEL],
-        },
-      },
-      data: {
-        deletedAt: expect.any(Date),
-      },
-    });
-  });
-
-  it('soft deletes the same-year sibling source when the latest upload only contains one source type for a student', async () => {
-    await (service as any).softDeleteStaleCurrentYearEnrollmentSources(
-      2026,
-      new Map([[EnrollmentSourceType.SIMULATED_EXCEL, new Set(['student-1'])]]),
+    expect(prisma.enrollment.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          studentId: 'student-1',
+          academicYear: 2026,
+          sourceType: {
+            in: [EnrollmentSourceType.ONSITE_EXCEL],
+          },
+        }),
+      }),
     );
-
-    expect(prisma.enrollment.updateMany).toHaveBeenCalledWith({
-      where: {
-        studentId: 'student-1',
-        academicYear: 2026,
-        deletedAt: null,
-        sourceType: {
-          in: [EnrollmentSourceType.ONSITE_EXCEL],
-        },
-      },
-      data: {
-        deletedAt: expect.any(Date),
-      },
-    });
   });
 
   it('soft deletes stale same-source rounds that are missing from the latest simulated file for a student', async () => {

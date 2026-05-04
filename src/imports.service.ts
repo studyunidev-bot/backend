@@ -276,7 +276,6 @@ export class ImportsService {
       onsite: null,
       simulated: null,
     };
-    const importedStudentIdsBySource = new Map<EnrollmentSourceType, Set<string>>();
     const startedAt = Date.now();
 
     try {
@@ -293,9 +292,8 @@ export class ImportsService {
           uploadedById: request.uploadedById,
           examDate: request.examDate,
         });
-        const { importedStudentIds, ...onsiteSummary } = onsiteResult;
+        const { importedStudentIds: _importedStudentIds, ...onsiteSummary } = onsiteResult;
         response.onsite = onsiteSummary;
-        importedStudentIdsBySource.set(EnrollmentSourceType.ONSITE_EXCEL, new Set(importedStudentIds));
       }
 
       if (request.files.simulated?.[0]) {
@@ -307,16 +305,8 @@ export class ImportsService {
           uploadedById: request.uploadedById,
           examDate: request.examDate,
         });
-        const { importedStudentIds, ...simulatedSummary } = simulatedResult;
+        const { importedStudentIds: _importedStudentIds, ...simulatedSummary } = simulatedResult;
         response.simulated = simulatedSummary;
-        importedStudentIdsBySource.set(
-          EnrollmentSourceType.SIMULATED_EXCEL,
-          new Set(importedStudentIds),
-        );
-      }
-
-      if (importedStudentIdsBySource.size > 0) {
-        await this.softDeleteStaleCurrentYearEnrollmentSources(academicYear, importedStudentIdsBySource);
       }
 
       const durationMs = Date.now() - startedAt;
@@ -872,7 +862,6 @@ export class ImportsService {
       enrollmentStateMap,
     );
     const historicalEnrollmentCleanupDone = new Set<string>();
-    const sameYearSiblingCleanupDone = new Set<string>();
     const importedStudentIds = new Set<string>();
     const importedEnrollmentRounds = new Map<string, Set<ExamRound>>();
     let unresolvedLocationCount = 0;
@@ -923,11 +912,6 @@ export class ImportsService {
           if (!historicalEnrollmentCleanupDone.has(student.id)) {
             await this.softDeleteHistoricalEnrollments(student.id, params.academicYear);
             historicalEnrollmentCleanupDone.add(student.id);
-          }
-
-          if (!sameYearSiblingCleanupDone.has(student.id)) {
-            await this.softDeleteSameYearSiblingEnrollmentSources(student.id, params.academicYear, params.sourceType);
-            sameYearSiblingCleanupDone.add(student.id);
           }
 
           const effectiveRound = row.examRound || params.round;
@@ -1107,44 +1091,6 @@ export class ImportsService {
     };
   }
 
-  private async softDeleteStaleCurrentYearEnrollmentSources(
-    academicYear: number,
-    importedStudentIdsBySource: Map<EnrollmentSourceType, Set<string>>,
-  ) {
-    const desiredSourceTypesByStudent = new Map<string, Set<EnrollmentSourceType>>();
-    const managedSourceTypes = [EnrollmentSourceType.ONSITE_EXCEL, EnrollmentSourceType.SIMULATED_EXCEL];
-
-    for (const [sourceType, studentIds] of importedStudentIdsBySource.entries()) {
-      for (const studentId of studentIds) {
-        const desiredSourceTypes = desiredSourceTypesByStudent.get(studentId) ?? new Set<EnrollmentSourceType>();
-        desiredSourceTypes.add(sourceType);
-        desiredSourceTypesByStudent.set(studentId, desiredSourceTypes);
-      }
-    }
-
-    for (const [studentId, desiredSourceTypes] of desiredSourceTypesByStudent.entries()) {
-      const staleSourceTypes = managedSourceTypes.filter((sourceType) => !desiredSourceTypes.has(sourceType));
-
-      if (staleSourceTypes.length === 0) {
-        continue;
-      }
-
-      await this.prisma.enrollment.updateMany({
-        where: {
-          studentId,
-          academicYear,
-          deletedAt: null,
-          sourceType: {
-            in: staleSourceTypes,
-          },
-        },
-        data: {
-          deletedAt: new Date(),
-        },
-      });
-    }
-  }
-
   private async softDeleteHistoricalEnrollments(studentId: string, academicYear: number) {
     await this.prisma.enrollment.updateMany({
       where: {
@@ -1153,34 +1099,6 @@ export class ImportsService {
           not: academicYear,
         },
         deletedAt: null,
-      },
-      data: {
-        deletedAt: new Date(),
-      },
-    });
-  }
-
-  private async softDeleteSameYearSiblingEnrollmentSources(
-    studentId: string,
-    academicYear: number,
-    sourceType: EnrollmentSourceType,
-  ) {
-    const siblingSourceTypes = [EnrollmentSourceType.ONSITE_EXCEL, EnrollmentSourceType.SIMULATED_EXCEL].filter(
-      (candidate) => candidate !== sourceType,
-    );
-
-    if (siblingSourceTypes.length === 0) {
-      return;
-    }
-
-    await this.prisma.enrollment.updateMany({
-      where: {
-        studentId,
-        academicYear,
-        deletedAt: null,
-        sourceType: {
-          in: siblingSourceTypes,
-        },
       },
       data: {
         deletedAt: new Date(),
