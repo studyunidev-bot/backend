@@ -410,4 +410,29 @@ describe('PortalService', () => {
       },
     ]);
   });
+
+  it('returns no portal score rows when the score record exists but every score field is empty', () => {
+    const rows = (service as any).mapScores(
+      {
+        id: 'score-blank',
+        tgat: null,
+        tgat1: null,
+        tgat2: null,
+        tgat3: null,
+        rankingOverall: null,
+        rankingLocation: null,
+        rankingOverallTgat1: null,
+        rankingLocationTgat1: null,
+        rankingOverallTgat2: null,
+        rankingLocationTgat2: null,
+        rankingOverallTgat3: null,
+        rankingLocationTgat3: null,
+      },
+      'จ.เชียงใหม่',
+      567,
+      2000,
+    );
+
+    expect(rows).toEqual([]);
+  });
 });

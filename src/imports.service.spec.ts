@@ -231,6 +231,81 @@ describe('ImportsService', () => {
     });
   });
 
+  it('resolves legacy location upload headers that use สนามสอบหมายเลข and สถานที่', () => {
+    const resolved = (service as any).tryResolveHeaderIndexes(
+      [[
+        'สนามสอบหมายเลข',
+        'สถานที่',
+        'จังหวัด',
+        'ที่อยู่',
+      ]],
+      {
+        code: [
+          'code',
+          'locationcode',
+          'examlocationcode',
+          'รหัสสนามสอบ',
+          'รหัสสถานที่สอบ',
+          'สนามสอบที่',
+          'ข้อมูลผู้สมัครสนามสอบที่',
+          'สนามสอบหมายเลข',
+        ],
+        name: [
+          'name',
+          'locationname',
+          'ชื่อสนามสอบ',
+          'สนามสอบ',
+          'ชื่อสถานที่สอบ',
+          'สถานที่สอบ',
+          'ชื่อสถานที่',
+          'สถานที่',
+          'สนามสอบ/สถานที่สอบ',
+        ],
+        province: ['province', 'จังหวัด'],
+        address: ['address', 'ที่อยู่', 'ห้องสอบ'],
+      },
+    );
+
+    expect(resolved).not.toBeNull();
+    expect(resolved?.headerMap).toMatchObject({
+      code: 0,
+      name: 1,
+      province: 2,
+      address: 3,
+    });
+  });
+
+  it('matches location headers even when Excel adds punctuation and hidden characters', () => {
+    const resolved = (service as any).tryResolveHeaderIndexes(
+      [[
+        'สนามสอบที่:',
+        'ชื่อสถานที่สอบ\u200B',
+        'จังหวัด',
+        'กำหนดการ/เวลา',
+      ]],
+      {
+        code: ['code', 'locationcode', 'examlocationcode', 'รหัสสนามสอบ', 'รหัสสถานที่สอบ', 'สนามสอบที่'],
+        name: ['name', 'locationname', 'ชื่อสนามสอบ', 'สนามสอบ', 'ชื่อสถานที่สอบ'],
+        province: ['province', 'จังหวัด'],
+        timeRange: ['timerange', 'time', 'เวลาสอบ', 'เวลา', 'ช่วงเวลา', 'รอบเวลา', 'กำหนดการ'],
+      },
+    );
+
+    expect(resolved).not.toBeNull();
+    expect(resolved?.headerMap).toMatchObject({
+      code: 0,
+      name: 1,
+      province: 2,
+      timeRange: 3,
+    });
+  });
+
+  it('normalizes zero-width characters and punctuation in header values', () => {
+    expect((service as any).normalizeHeader('ชื่อสถานที่สอบ\u200B')).toBe('ชื่อสถานที่สอบ');
+    expect((service as any).normalizeHeader('สนามสอบที่:')).toBe('สนามสอบที่');
+    expect((service as any).normalizeHeader('กำหนดการ/เวลา')).toBe('กำหนดการเวลา');
+  });
+
   it('normalizes textual simulated location codes like สนามสอบที่ 8 to the numeric code', () => {
     const row = (service as any).mapEnrollmentRow({
       nationalId: '1101700473945',
@@ -921,7 +996,7 @@ describe('ImportsService', () => {
         rankingLocationTgat2: 234,
         rankingOverallTgat3: 2222,
         rankingLocationTgat3: 99,
-        percentile: undefined,
+        percentile: null,
       },
       create: {
         enrollmentId: 'enrollment-1',
@@ -937,7 +1012,77 @@ describe('ImportsService', () => {
         rankingLocationTgat2: 234,
         rankingOverallTgat3: 2222,
         rankingLocationTgat3: 99,
-        percentile: undefined,
+        percentile: null,
+      },
+    });
+  });
+
+  it('clears simulated score fields when a re-uploaded row leaves every score column blank', async () => {
+    prisma.student.createManyAndReturn.mockResolvedValue([{ id: 'student-1', nationalId: '1102400222395' }]);
+    prisma.enrollment.findMany.mockResolvedValue([
+      {
+        barcode: '12345678',
+        notes: null,
+        examRound: ExamRound.AFTERNOON,
+        student: {
+          nationalId: '1102400222395',
+        },
+      },
+    ]);
+    prisma.enrollment.upsert.mockResolvedValue({ id: 'enrollment-1', barcode: '12345678', notes: null });
+
+    await (service as any).flushEnrollmentBatch(
+      [
+        {
+          rowNumber: 3,
+          row: {
+            nationalId: '1102400222395',
+            firstNameTh: 'ศิริศักดิ์',
+            lastNameTh: 'ธิดชัชวาลกุล',
+            registeredAt: new Date('2026-03-01T09:00:00.000Z'),
+          },
+        },
+      ],
+      {
+        academicYear: 2026,
+        round: ExamRound.AFTERNOON,
+        sourceType: EnrollmentSourceType.SIMULATED_EXCEL,
+        importFileId: 'import-blank-score',
+      },
+    );
+
+    expect(prisma.score.upsert).toHaveBeenCalledWith({
+      where: { enrollmentId: 'enrollment-1' },
+      update: {
+        tgat: null,
+        tgat1: null,
+        tgat2: null,
+        tgat3: null,
+        rankingOverall: null,
+        rankingLocation: null,
+        rankingOverallTgat1: null,
+        rankingLocationTgat1: null,
+        rankingOverallTgat2: null,
+        rankingLocationTgat2: null,
+        rankingOverallTgat3: null,
+        rankingLocationTgat3: null,
+        percentile: null,
+      },
+      create: {
+        enrollmentId: 'enrollment-1',
+        tgat: null,
+        tgat1: null,
+        tgat2: null,
+        tgat3: null,
+        rankingOverall: null,
+        rankingLocation: null,
+        rankingOverallTgat1: null,
+        rankingLocationTgat1: null,
+        rankingOverallTgat2: null,
+        rankingLocationTgat2: null,
+        rankingOverallTgat3: null,
+        rankingLocationTgat3: null,
+        percentile: null,
       },
     });
   });

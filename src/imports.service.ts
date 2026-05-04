@@ -175,8 +175,27 @@ const ENROLLMENT_HEADERS: HeaderResolverConfig = {
 type RequiredHeaderField = 'nationalId' | 'firstNameTh' | 'lastNameTh' | 'code' | 'name';
 
 const LOCATION_HEADERS: HeaderResolverConfig = {
-  code: ['code', 'locationcode', 'รหัสสนามสอบ', 'รหัสสถานที่สอบ', 'สนามสอบที่'],
-  name: ['name', 'locationname', 'ชื่อสนามสอบ', 'สนามสอบ', 'ชื่อสถานที่สอบ'],
+  code: [
+    'code',
+    'locationcode',
+    'examlocationcode',
+    'รหัสสนามสอบ',
+    'รหัสสถานที่สอบ',
+    'สนามสอบที่',
+    'ข้อมูลผู้สมัครสนามสอบที่',
+    'สนามสอบหมายเลข',
+  ],
+  name: [
+    'name',
+    'locationname',
+    'ชื่อสนามสอบ',
+    'สนามสอบ',
+    'ชื่อสถานที่สอบ',
+    'สถานที่สอบ',
+    'ชื่อสถานที่',
+    'สถานที่',
+    'สนามสอบ/สถานที่สอบ',
+  ],
   province: ['province', 'จังหวัด'],
   address: ['address', 'ที่อยู่', 'ห้องสอบ'],
   seatCapacity: ['seatcapacity', 'capacity', 'จำนวนที่นั่ง', 'จำนวนผู้เข้าสอบ'],
@@ -1062,7 +1081,7 @@ export class ImportsService {
           existingRounds.add(effectiveRound);
           importedEnrollmentRounds.set(student.id, existingRounds);
 
-          if (params.sourceType === EnrollmentSourceType.SIMULATED_EXCEL && this.hasScoreData(row)) {
+          if (params.sourceType === EnrollmentSourceType.SIMULATED_EXCEL) {
             await this.prisma.score.upsert({
               where: { enrollmentId: enrollment.id },
               update: this.buildScorePayload(row),
@@ -1449,39 +1468,21 @@ export class ImportsService {
     };
   }
 
-  private hasScoreData(row: EnrollmentImportRow) {
-    return [
-      row.tgat,
-      row.tgat1,
-      row.tgat2,
-      row.tgat3,
-      row.rankingOverall,
-      row.rankingLocation,
-      row.rankingOverallTgat1,
-      row.rankingLocationTgat1,
-      row.rankingOverallTgat2,
-      row.rankingLocationTgat2,
-      row.rankingOverallTgat3,
-      row.rankingLocationTgat3,
-      row.percentile,
-    ].some((value) => value !== null && value !== undefined);
-  }
-
   private buildScorePayload(row: EnrollmentImportRow) {
     return {
-      tgat: row.tgat,
-      tgat1: row.tgat1,
-      tgat2: row.tgat2,
-      tgat3: row.tgat3,
-      rankingOverall: row.rankingOverall,
-      rankingLocation: row.rankingLocation,
-      rankingOverallTgat1: row.rankingOverallTgat1,
-      rankingLocationTgat1: row.rankingLocationTgat1,
-      rankingOverallTgat2: row.rankingOverallTgat2,
-      rankingLocationTgat2: row.rankingLocationTgat2,
-      rankingOverallTgat3: row.rankingOverallTgat3,
-      rankingLocationTgat3: row.rankingLocationTgat3,
-      percentile: row.percentile,
+      tgat: row.tgat ?? null,
+      tgat1: row.tgat1 ?? null,
+      tgat2: row.tgat2 ?? null,
+      tgat3: row.tgat3 ?? null,
+      rankingOverall: row.rankingOverall ?? null,
+      rankingLocation: row.rankingLocation ?? null,
+      rankingOverallTgat1: row.rankingOverallTgat1 ?? null,
+      rankingLocationTgat1: row.rankingLocationTgat1 ?? null,
+      rankingOverallTgat2: row.rankingOverallTgat2 ?? null,
+      rankingLocationTgat2: row.rankingLocationTgat2 ?? null,
+      rankingOverallTgat3: row.rankingOverallTgat3 ?? null,
+      rankingLocationTgat3: row.rankingLocationTgat3 ?? null,
+      percentile: row.percentile ?? null,
     };
   }
 
@@ -1729,7 +1730,8 @@ export class ImportsService {
   }
 
   private findHeaderIndex(headers: string[], aliases: string[], field: string) {
-    const exactIndex = headers.findIndex((header) => aliases.includes(String(header ?? '')));
+    const normalizedAliases = aliases.map((alias) => this.normalizeHeader(String(alias ?? ''))).filter(Boolean);
+    const exactIndex = headers.findIndex((header) => normalizedAliases.includes(this.normalizeHeader(String(header ?? ''))));
 
     if (exactIndex !== -1) {
       return exactIndex;
@@ -1740,8 +1742,8 @@ export class ImportsService {
     }
 
     return headers.findIndex((header) => {
-      const normalizedHeader = String(header ?? '');
-      return aliases.some((alias) => normalizedHeader.endsWith(alias));
+      const normalizedHeader = this.normalizeHeader(String(header ?? ''));
+      return normalizedAliases.some((alias) => normalizedHeader.endsWith(alias));
     });
   }
 
@@ -2726,7 +2728,11 @@ export class ImportsService {
   }
 
   private normalizeHeader(value: string) {
-    return value.replace(/\s+/g, '').replace(/[()_\-]/g, '').toLowerCase();
+    return value
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\s+/g, '')
+      .replace(/[()_\-:;,./\\|]/g, '')
+      .toLowerCase();
   }
 
   private isEmptyRow(values: unknown[]) {
