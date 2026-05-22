@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Delete, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { Roles } from './roles.decorator';
@@ -36,6 +36,23 @@ export class StudentsController {
         page: query.page,
         pageSize: query.pageSize,
       },
+      req.user
+        ? {
+            id: req.user.sub,
+            role: req.user.role as Role,
+          }
+        : null,
+    );
+  }
+
+  @Delete(':id')
+  @Roles(Role.ADMIN, Role.SUPERADMIN)
+  async deleteStudent(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.studentsService.deleteStudent(
+      id,
       req.user
         ? {
             id: req.user.sub,

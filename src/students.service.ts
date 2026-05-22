@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EnrollmentSourceType, EnrollmentStatus, Prisma, Role } from './generated/prisma/client';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -19,6 +19,7 @@ const PENDING_LOCATION_PREFIX = 'pendingLocationCode:';
 
 @Injectable()
 export class StudentsService {
+  private readonly logger = new Logger('StudentAudit');
   constructor(private readonly prisma: PrismaService) {}
 
   async listStudents(query: StudentListQuery, actor: StudentActor) {
@@ -73,6 +74,72 @@ export class StudentsService {
       },
       summary,
     };
+  }
+
+  async deleteStudent(studentId: string, actor: StudentActor) {
+    if (!actor || (actor.role !== Role.ADMIN && actor.role !== Role.SUPERADMIN)) {
+      throw new ForbiddenException('สิทธิ์การใช้งานไม่เพียงพอ ต้องเป็นระดับ Admin หรือ Super Admin เท่านั้น');
+    }
+
+    const student = await this.prisma.student.findUnique({
+      where: { id: studentId },
+    });
+
+    if (!student) {
+      throw new NotFoundException('ไม่พบข้อมูลนักเรียน');
+    }
+
+    // Hard Delete ลบข้อมูลทุกอย่างที่เกี่ยวข้องกันใน Transaction เดียว
+    await this.prisma.$transaction(async (tx: any) => {
+      // 1. หา enrollments ทั้งหมดของเด็กคนนี้ก่อน
+      const enrollments = await tx.enrollment.findMany({
+        where: { studentId },
+        select: { id: true },
+      });
+      const enrollmentIds = enrollments.map((e) => e.id);
+
+      if (enrollmentIds.length > 0) {
+        // 2. ลบ Check-ins
+        await tx.checkIn.deleteMany({
+          where: { enrollmentId: { in: enrollmentIds } },
+        });
+
+        // 3. ลบ Scores
+        await tx.score.deleteMany({
+          where: { enrollmentId: { in: enrollmentIds } },
+        });
+
+        // 4. ลบ Forfeit Requests
+        await tx.forfeitRequest.deleteMany({
+          where: { enrollmentId: { in: enrollmentIds } },
+        });
+
+        // 5. ลบ Enrollments
+        await tx.enrollment.deleteMany({
+          where: { id: { in: enrollmentIds } },
+        });
+      }
+
+      // 6. ลบ Student
+      await tx.student.delete({
+        where: { id: studentId },
+      });
+    });
+
+    // Audit Logging
+    this.logger.log(
+      JSON.stringify({
+        action: 'DELETE_STUDENT_HARD',
+        actorId: actor.id,
+        actorRole: actor.role,
+        targetStudentId: student.id,
+        targetNationalId: student.nationalId,
+        targetName: `${student.firstNameTh} ${student.lastNameTh}`,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    return { success: true, message: 'ลบข้อมูลนักเรียนเรียบร้อยแล้ว' };
   }
 
   private async buildSummary(academicYear?: number) {
